@@ -42,6 +42,19 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           sed 's/\x1b\[[0-9;]*m//g' selftest.txt >> "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish screenshots to the "screenshots" branch
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/shots"
+          cp vaim-home/*.png selftest.txt "$RUNNER_TEMP/shots/" 2>/dev/null || true
+          cd "$RUNNER_TEMP/shots"
+          git init -q -b screenshots
+          git add -A
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "UI screenshots for ${GITHUB_SHA::7}"
+          git push -q -f "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}" screenshots
       - name: Upload UI screenshots
         if: always()
         uses: actions/upload-artifact@v4
