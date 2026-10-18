@@ -1,0 +1,6 @@
+# torch is installed separately by install.ps1 from the CUDA index that matches your GPU
+numpy>=1.26
+pillow>=10.0
+PySide6>=6.7
+ftfy>=6.1
+regex>=2023.0

@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.vaim-home/
+
+# Build outputs
+dist/
+installer/build/
+installer/setup/payload.zip
+installer/*/res.rc
+
+# Local installs / tools created by the installer
+.tools/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

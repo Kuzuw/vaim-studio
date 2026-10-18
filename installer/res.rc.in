@@ -1,0 +1,27 @@
+1 ICON "../../app/vaim_studio/assets/icon.ico"
+1 24 "../app.manifest"
+1 VERSIONINFO
+FILEVERSION @V1@,@V2@,@V3@,0
+PRODUCTVERSION @V1@,@V2@,@V3@,0
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "VAIM Studio"
+      VALUE "FileDescription", "@DESC@"
+      VALUE "FileVersion", "@VERSION@"
+      VALUE "InternalName", "@NAME@"
+      VALUE "OriginalFilename", "@FILE@"
+      VALUE "ProductName", "VAIM Studio - Vintage AI Model Studio"
+      VALUE "ProductVersion", "@VERSION@"
+      VALUE "LegalCopyright", "MIT License; see LICENSE and THIRD_PARTY_NOTICES.md"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
