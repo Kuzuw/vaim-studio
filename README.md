@@ -17,6 +17,11 @@ NVIDIA cards, down to a 4 GB GTX 1650. The app adds Real-ESRGAN upscaling up to 
 
 If you like the dreamlike, slightly uncanny look of early text-to-image models, this is for you.
 
+<p align="center">
+  <img src="https://github.com/Kuzuw/vaim-studio/blob/screenshots/ui_preview_welcome.png?raw=true" alt="VAIM Studio window" width="88%">
+  <br><sub>Screenshot generated automatically by CI from the current code (Linux fonts).</sub>
+</p>
+
 ---
 
 ## Features
