@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       QT_QPA_PLATFORM: offscreen
-      VAIM_HOME: ${{ github.workspace }}/.vaim-home
+      VAIM_HOME: ${{ github.workspace }}/vaim-home
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -33,13 +33,23 @@ jobs:
       - name: Lint
         run: python -m pyflakes app scripts
       - name: Self-test
-        run: python app/tools/selftest.py
+        run: |
+          set -o pipefail
+          python app/tools/selftest.py 2>&1 | tee selftest.txt
+      - name: Self-test summary
+        if: always()
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          sed 's/\x1b\[[0-9;]*m//g' selftest.txt >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: Upload UI screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ui-screenshots
-          path: .vaim-home/*.png
+          path: |
+            vaim-home/*.png
+            selftest.txt
           if-no-files-found: ignore
 
   build:
