@@ -161,6 +161,8 @@ class Segmented(QWidget):
             b.setObjectName(name)
             b.setCheckable(True)
             b.setCursor(Qt.PointingHandCursor)
+            b.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            b.setMinimumHeight(32)
             lay.addWidget(b)
             self.group.addButton(b, i)
         self.group.idClicked.connect(self.changed.emit)
@@ -287,6 +289,8 @@ class MainWindow(QMainWindow):
         f.setContentsMargins(22, 18, 22, 16)
         f.setSpacing(8)
         scroll.setWidget(inner)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        inner.setMaximumWidth(384)
         sv.addWidget(scroll, 1)
 
         head = QHBoxLayout()
@@ -307,7 +311,9 @@ class MainWindow(QMainWindow):
         self._heading(f, "Describe your image")
         self.prompt = QPlainTextEdit()
         self.prompt.setObjectName("prompt")
-        self.prompt.setPlaceholderText("a lantern dangling from a tree in a foggy graveyard")
+        self.prompt.setPlaceholderText("a lantern dangling from a tree in a foggy graveyard\n\n"
+                                       "Tip: blend ideas with  |   e.g.  a castle | made of fire")
+        self.prompt.setToolTip("Describe the image. Use | to blend several ideas.")
         self.prompt.setFixedHeight(96)
         f.addWidget(self.prompt)
         links = QHBoxLayout()
@@ -330,7 +336,6 @@ class MainWindow(QMainWindow):
         links.addWidget(self.img_btn)
         links.addWidget(self.img_clear)
         links.addStretch(1)
-        links.addWidget(label("use  |  to blend ideas"))
         f.addLayout(links)
         self.negative = QLineEdit()
         self.negative.setPlaceholderText("Avoid:  text | people | frames")
@@ -354,12 +359,13 @@ class MainWindow(QMainWindow):
         self.preset_group = QButtonGroup(self)
         self.preset_buttons = {}
         for i, (name, p) in enumerate(PRESETS.items()):
-            b = QPushButton(f"{name}\n{p['sub']}")
+            b = QPushButton(f"{name}\n{p['sub']}".replace("&", "&&"))  # '&' would be a shortcut marker
             b.setObjectName("preset")
             b.setCheckable(True)
             b.setCursor(Qt.PointingHandCursor)
             b.setToolTip(p["tip"])
             b.setMinimumHeight(52)
+            b.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             b.clicked.connect(lambda _=False, n=name: self.apply_preset(n))
             self.preset_group.addButton(b, i)
             self.preset_buttons[name] = b
@@ -381,8 +387,15 @@ class MainWindow(QMainWindow):
         self.custom_size.setFixedWidth(92)
         self.custom_size.valueChanged.connect(lambda _: self.update_hints())
         srow.addWidget(self.size_seg, 1)
-        srow.addWidget(self.custom_size)
         f.addLayout(srow)
+        crow = QHBoxLayout()
+        crow.addWidget(label("Custom size", "field"))
+        crow.addStretch(1)
+        crow.addWidget(self.custom_size)
+        self.custom_row = QWidget()
+        self.custom_row.setLayout(crow)
+        crow.setContentsMargins(0, 0, 0, 0)
+        f.addWidget(self.custom_row)
         self.size_hint = label("", wrap=True)
         f.addWidget(self.size_hint)
         self.sharpen_row = QWidget()
@@ -416,6 +429,7 @@ class MainWindow(QMainWindow):
         self.folder_btn.setObjectName("folder")
         self.folder_btn.setCursor(Qt.PointingHandCursor)
         self.folder_btn.clicked.connect(self.pick_out_dir)
+        self.folder_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.fmt = QComboBox()
         self.fmt.addItems(list(storage.FORMATS))
         self.fmt.setToolTip("PNG = lossless. JPEG / WebP = much smaller files at 95% quality.")
@@ -555,7 +569,7 @@ class MainWindow(QMainWindow):
         b = QVBoxLayout(bottom)
         b.setContentsMargins(22, 12, 22, 16)
         b.setSpacing(8)
-        self.estimate = label("", "estimate")
+        self.estimate = label("", "estimate", wrap=True)
         b.addWidget(self.estimate)
         arow = QHBoxLayout()
         arow.setSpacing(8)
@@ -962,7 +976,7 @@ class MainWindow(QMainWindow):
                                   ("  ·  the original 2021 setting" if n == 128 else ""))
         native = self.native_size()
         out = self.output_size()
-        self.custom_size.setVisible(SIZES[self.size_seg.index()][1] == -1)
+        self.custom_row.setVisible(SIZES[self.size_seg.index()][1] == -1)
         upscale = bool(out) and out > native
         self.sharpen_row.setVisible(upscale)
         warn = False
@@ -1005,7 +1019,7 @@ class MainWindow(QMainWindow):
     def _update_folder_button(self):
         p = str(self.out_dir)
         fm = self.folder_btn.fontMetrics()
-        self.folder_btn.setText("📁  " + fm.elidedText(p, Qt.ElideMiddle, 200))
+        self.folder_btn.setText("📁  " + fm.elidedText(p, Qt.ElideMiddle, 170))
         self.folder_btn.setToolTip(f"Render folder:\n{p}\n\nClick to change")
         if hasattr(self, "gallery_title"):
             self.gallery_title.setText(f"Gallery  ·  {self.out_dir.name}")
