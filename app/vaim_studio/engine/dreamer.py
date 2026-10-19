@@ -314,6 +314,10 @@ class _Trainer:
 class Dreamer:
     def __init__(self, device=None, log=print):
         self.log = log
+        # stage(key, fraction, detail): what the engine is doing, for the progress display.
+        # key is "prepare" | "paint" | "upscale"; fraction is 0..1 of that stage, or -1 if unknown.
+        self.stage = lambda key, frac=-1.0, detail="": None
+        self._tune_n = 0
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         if self.device.type == "cuda" and self.device.index is None:
             self.device = torch.device("cuda", torch.cuda.current_device())  # some CUDA APIs need the index
@@ -392,6 +396,7 @@ class Dreamer:
             self._compiled.clear()
             self._free()
             self.log(f"Loading BigGAN-deep {image_size} ...")
+            self.stage("prepare", -1, f"Loading the BigGAN {image_size} painter onto your GPU")
             m = BigGAN.load(weights.file_path(key, "config.json"), weights.file_path(key, "pytorch_model.bin"), self.log)
             if self.device.type == "cuda":
                 # channels_last feeds tensor cores (RTX); on GTX cards plain NCHW kernels are faster
@@ -405,6 +410,7 @@ class Dreamer:
             self._compiled.clear()
             self._free()
             self.log(f"Loading CLIP {clip_name} ...")
+            self.stage("prepare", -1, "Loading CLIP, the model that reads your prompt")
             path = next(iter(weights.MODELS[key]["files"]))
             self.clip, self.clip_name = self._load_clip(weights.file_path(key, path)), clip_name
 
@@ -413,6 +419,7 @@ class Dreamer:
             from .upscale import Upscaler
             weights.ensure("esrgan-x2", progress, cancelled, self.log)
             self.log("Loading Real-ESRGAN x2 ...")
+            self.stage("prepare", -1, "Loading the Real-ESRGAN upscaler")
             self.upscaler = Upscaler(weights.file_path("esrgan-x2", "RealESRGAN_x2plus.pth"), self.device,
                                      half=self.has_tensor_cores())
 
@@ -530,6 +537,8 @@ class Dreamer:
                       s.max_classes, s.class_temperature)
         t = _Trainer(self, s, lat, pos, neg, amp, ckpt, chunk)
         its = None
+        self._tune_n += 1
+        self.stage("prepare", -1, f"Finding the fastest settings for your GPU (one time only) · test {self._tune_n}")
         torch.cuda.reset_peak_memory_stats(self.device)
         try:
             t.step()                      # warm-up (cuDNN picks algorithms here)
@@ -560,6 +569,7 @@ class Dreamer:
             amp_c = {"fp16": torch.float16, "bf16": torch.bfloat16}.get(cached.get("amp"))
             return amp_c, cached["ckpt"], cached["chunk"], cached.get("clip_half", clip_half0)
         self.log("Tuning for your GPU (one time for these settings, ~20-40 s) ...")
+        self._tune_n = 0
         n = s.cutouts
         stop = lambda: bool(should_stop and should_stop())  # noqa: E731
         ckpts = [c for c in (False, True) if not (s.checkpointing == "on" and not c or s.checkpointing == "off" and c)]
@@ -723,6 +733,8 @@ class Dreamer:
             if w * 1.5 >= target:
                 break
         out = []
+        per_img = sum(4 ** q for q in range(passes))
+        total = per_img * len(images)
         for k, im in enumerate(images):
             up = im
             for p in range(passes):
@@ -731,7 +743,14 @@ class Dreamer:
                 t0 = time.perf_counter()
                 self.log(f"Upscaling image {k + 1}/{len(images)}: pass {p + 1}/{passes} "
                          f"({up.width} -> {up.width * 2}px) ...")
-                up = self.upscaler.run(up)
+                done = k * per_img + sum(4 ** q for q in range(p))
+                what = (f"image {k + 1} of {len(images)} · " if len(images) > 1 else "") + \
+                    f"pass {p + 1} of {passes} · {up.width} → {up.width * 2} px"
+
+                def on_tile(i, n, done=done, p=p, what=what):
+                    self.stage("upscale", (done + 4 ** p * i / n) / total, what)
+                on_tile(0, 1)
+                up = self.upscaler.run(up, on_tile)
                 self.log(f"  pass {p + 1} took {time.perf_counter() - t0:.1f} s")
             if up.width != target:
                 up = up.resize((target, target), Image.LANCZOS)
@@ -745,9 +764,11 @@ class Dreamer:
     def run(self, s: DreamSettings, on_preview: Callable[[Preview], None] = None,
             should_stop: Callable[[], bool] = None, progress=None):
         dev = self.device
+        self.stage("prepare", -1, "Checking what your GPU handles best")
         self._probe_fp16()
         if s.seed is not None:
             torch.manual_seed(s.seed)
+        self.stage("prepare", -1, "Reading your prompt")
         pos, neg = self._targets(s)
         amp = self._amp_dtype(s)
         amp, ckpt, chunk, clip_half = self._memory_plan(s, pos, neg, amp, should_stop)
@@ -798,6 +819,8 @@ class Dreamer:
         note = ""
         prev_small, prev_small_step, calm = None, 0, 0
         patience = 3
+        early = {1, 5} if s.preview_every > 5 else set()  # show something right away
+        self.stage("paint", 0.0, f"step 0 of {s.steps} · the first steps warm up the GPU")
         while step < s.steps:
             if should_stop and should_stop():
                 break
@@ -811,7 +834,8 @@ class Dreamer:
                 if t:
                     self.log("Step breakdown: BigGAN forward {:.0f} ms, CLIP fwd+bwd {:.0f} ms, "
                              "BigGAN backward {:.0f} ms, optimiser {:.0f} ms".format(*t))
-            if step % s.preview_every == 0 or step == s.steps:
+            self.stage("paint", step / s.steps, f"step {step} of {s.steps}")
+            if step % s.preview_every == 0 or step == s.steps or step in early:
                 loss_val = loss_t.item() / s.batch  # the only per-preview sync
                 if not math.isfinite(loss_val):
                     # fall back one precision level and resume from the last good state
@@ -865,6 +889,7 @@ class Dreamer:
         self._free()
         if s.output_size and s.output_size > native[0].width:
             self.log(f"Upscaling to {s.output_size}x{s.output_size} ...")
+            self.stage("upscale", 0.0, "starting")
         images = self.finish_size(native, s, progress, should_stop)
         final = Preview(step, s.steps, images, loss_val, step / max(elapsed, 1e-6), final=True,
                         latents=latents, native=native, note=note)

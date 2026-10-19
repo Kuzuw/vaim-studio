@@ -1,19 +1,23 @@
 import random
+import sys
 import time
 from dataclasses import replace
 from pathlib import Path
 
 from PIL import Image
 from PySide6.QtCore import QPointF, QRectF, QSettings, QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QIcon, QImage, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtGui import (
+    QBrush, QColor, QFont, QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPen, QPixmap, QShortcut, QTextOption,
+)
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
+    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
     QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .. import __version__, storage
+from .theme import ACCENT, ACCENT_2, BORDER, CARD, MUTED, STOP, TEXT
 from .worker import EngineWorker
 
 BASES = [(128, "128 · lo-fi"), (256, "256 · soft"), (512, "512 · full")]
@@ -43,6 +47,11 @@ PRESETS = {
                        interp="nearest", sharpen=100,
                        tip="32 cutouts, 150 steps: a quick look (about 3× faster) before a full render."),
 }
+# progress display: stage key -> (chip label, headline)
+STAGES = {"prepare": ("Prepare", "Getting ready"), "paint": ("Paint", "Painting"),
+          "upscale": ("Upscale", "Upscaling"), "save": ("Save", "Saving")}
+UPSCALE_SECONDS = {0: 0, 1: 3, 2: 8, 3: 40}   # per image by number of x2 passes (GTX 1650), for estimates
+
 EXAMPLES = [
     "a lighthouse in a storm at night",
     "a cathedral made of glass",
@@ -90,6 +99,11 @@ class ImageView(QWidget):
         self.fit = True
         self.offset = QPointF(0, 0)
         self._drag = None
+        self.placeholder = None   # (headline, detail) shown with a spinner until the first image arrives
+        self._spin = 0
+        self._spin_timer = QTimer(self)
+        self._spin_timer.setInterval(30)
+        self._spin_timer.timeout.connect(self._turn)
         self.setMinimumSize(256, 256)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
@@ -97,7 +111,51 @@ class ImageView(QWidget):
         self.img = pil_to_qimage(im) if im is not None else None
         if not keep_view:
             self.offset = QPointF(0, 0)
+        self._sync_spinner()
         self.update()
+
+    def set_placeholder(self, head, detail=""):
+        self.placeholder = (head, detail) if head else None
+        self._sync_spinner()
+        self.update()
+
+    def _sync_spinner(self):
+        on = self.img is None and self.placeholder is not None
+        if on and not self._spin_timer.isActive():
+            self._spin_timer.start()
+        elif not on:
+            self._spin_timer.stop()
+
+    def _turn(self):
+        self._spin = (self._spin + 7) % 360
+        self.update()
+
+    def _paint_placeholder(self, p):
+        head, detail = self.placeholder
+        p.setRenderHint(QPainter.Antialiasing)
+        cx, cy = self.width() / 2, self.height() / 2 - 24
+        ring = QRectF(cx - 22, cy - 22, 44, 44)
+        pen = QPen(QColor(BORDER), 4)
+        p.setPen(pen)
+        p.drawEllipse(ring)
+        pen.setColor(QColor(ACCENT))
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        p.drawArc(ring, -self._spin * 16, 100 * 16)
+        opt = QTextOption(Qt.AlignHCenter | Qt.AlignTop)
+        opt.setWrapMode(QTextOption.WordWrap)
+        f = QFont(self.font())
+        f.setPointSizeF(13)
+        f.setWeight(QFont.Weight.DemiBold)
+        p.setFont(f)
+        p.setPen(QColor(TEXT))
+        p.drawText(QRectF(20, cy + 36, self.width() - 40, 28), head, opt)
+        if detail:
+            f.setPointSizeF(9.5)
+            f.setWeight(QFont.Weight.Normal)
+            p.setFont(f)
+            p.setPen(QColor(MUTED))
+            p.drawText(QRectF(40, cy + 66, self.width() - 80, 60), detail, opt)
 
     def set_fit(self, fit):
         self.fit = fit
@@ -121,6 +179,8 @@ class ImageView(QWidget):
 
     def paintEvent(self, e):
         if self.img is None:
+            if self.placeholder:
+                self._paint_placeholder(QPainter(self))
             return
         p = QPainter(self)
         r, s = self._geometry()
@@ -145,6 +205,184 @@ class ImageView(QWidget):
     def mouseDoubleClickEvent(self, e):
         if self.img is not None:
             self.set_fit(not self.fit)
+
+
+class FlowBar(QWidget):
+    """Slim progress bar that never looks frozen: while a render runs a soft glint keeps sweeping
+    across it, and when the length of a step is unknown a segment glides back and forth."""
+
+    def __init__(self):
+        super().__init__()
+        self.value = 0.0      # 0..1, or < 0 = working, length unknown
+        self.state = "idle"   # idle | run | done | stopped | error
+        self.phase = 0.0
+        self.setFixedHeight(8)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)
+        self._timer.timeout.connect(self._tick)
+
+    def set_state(self, state):
+        self.state = state
+        if state == "run":
+            self._timer.start()
+        else:
+            self._timer.stop()
+        self.update()
+
+    def set_value(self, v):
+        self.value = v
+        self.update()
+
+    def _tick(self):
+        self.phase = (self.phase + 0.011) % 1.0
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        r = QRectF(self.rect())
+        w, h = r.width(), r.height()
+        rad = h / 2
+        p.setBrush(QBrush(QColor(CARD)))
+        p.drawRoundedRect(r, rad, rad)
+        if self.state in ("error", "stopped"):
+            fill = QBrush(QColor(STOP if self.state == "error" else MUTED))
+        else:
+            g = QLinearGradient(0, 0, w, 0)
+            g.setColorAt(0, QColor(ACCENT))
+            g.setColorAt(1, QColor(ACCENT_2))
+            fill = QBrush(g)
+        if self.value < 0:
+            seg = w * 0.28
+            t = self.phase * 2 if self.phase < 0.5 else 2 - self.phase * 2
+            t = t * t * (3 - 2 * t)
+            bar = QRectF(t * (w - seg), 0, seg, h)
+        else:
+            bar = QRectF(0, 0, max(h, w * min(1.0, self.value)) if self.value > 0 else 0, h)
+        if bar.width() <= 0:
+            return
+        p.setBrush(fill)
+        p.drawRoundedRect(bar, rad, rad)
+        if self.state == "run" and self.value >= 0 and bar.width() > 24:
+            cx = bar.left() - 70 + (bar.width() + 140) * self.phase
+            g = QLinearGradient(cx - 70, 0, cx + 70, 0)
+            g.setColorAt(0, QColor(255, 255, 255, 0))
+            g.setColorAt(0.5, QColor(255, 255, 255, 120))
+            g.setColorAt(1, QColor(255, 255, 255, 0))
+            p.setBrush(QBrush(g))
+            p.drawRoundedRect(bar, rad, rad)
+
+
+class RenderProgress(QFrame):
+    """What the app is doing right now: stage chips, a live bar, details and time left."""
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("progress_card")
+        v = QVBoxLayout(self)
+        v.setContentsMargins(16, 11, 16, 11)
+        v.setSpacing(8)
+        top = QHBoxLayout()
+        top.setSpacing(4)
+        self.headline = label("", "phead")
+        self.headline.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        top.addWidget(self.headline, 1)
+        self.chips, self.seps = {}, {}
+        for i, (key, (name, _)) in enumerate(STAGES.items()):
+            if i:
+                self.seps[key] = label("›", "pchev")
+                top.addWidget(self.seps[key])
+            self.chips[key] = label(name, "pchip")
+            top.addWidget(self.chips[key])
+        v.addLayout(top)
+        self.bar = FlowBar()
+        v.addWidget(self.bar)
+        bottom = QHBoxLayout()
+        self.detail = label("", "pdetail")
+        self.detail.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        bottom.addWidget(self.detail, 1)
+        self.right = label("", "pright")
+        bottom.addWidget(self.right)
+        v.addLayout(bottom)
+
+    def set_upscale_visible(self, on):
+        self.chips["upscale"].setVisible(on)
+        self.seps["upscale"].setVisible(on)
+
+    def set_active(self, key):
+        """Mark stages before `key` done and `key` active (key=None: all done)."""
+        order = list(STAGES)
+        cur = order.index(key) if key in order else len(order)
+        for i, k in enumerate(order):
+            name = STAGES[k][0]
+            if i < cur:
+                self.chips[k].setText("✓ " + name)
+                restyle(self.chips[k], "pchip_done")
+            else:
+                self.chips[k].setText(name)
+                restyle(self.chips[k], "pchip_on" if i == cur else "pchip")
+
+
+class _Taskbar:
+    """Progress on the Windows taskbar button (ITaskbarList3 through plain ctypes COM)."""
+    NONE, BUSY, NORMAL, ERROR, PAUSED = 0, 1, 2, 4, 8
+
+    def __init__(self):
+        self.ptr = None
+        self.tried = False
+
+    def _init(self):
+        self.tried = True
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            ole32 = ctypes.OleDLL("ole32")
+            try:
+                ole32.CoInitialize(None)  # Qt has normally done this already (S_FALSE)
+            except OSError:
+                pass
+
+            class GUID(ctypes.Structure):
+                _fields_ = [("d1", ctypes.c_ulong), ("d2", ctypes.c_ushort), ("d3", ctypes.c_ushort),
+                            ("d4", ctypes.c_ubyte * 8)]
+
+            def guid(text):
+                g = GUID()
+                ole32.CLSIDFromString(ctypes.c_wchar_p(text), ctypes.byref(g))
+                return g
+            clsid = guid("{56FDF344-FD6D-11d0-958A-006097C9A090}")   # CLSID_TaskbarList
+            iid = guid("{EA1AFB91-9E28-4B86-90E9-9E9F8A5EEFAF}")     # IID_ITaskbarList3
+            ptr = ctypes.c_void_p()
+            ole32.CoCreateInstance(ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(ptr))
+            if ptr.value:
+                self.ptr = ptr
+                self._call(3, ())  # HrInit
+        except Exception as e:
+            print(f"(taskbar progress unavailable: {e})")
+            self.ptr = None
+
+    def _call(self, index, argtypes, *args):
+        import ctypes
+        vtbl = ctypes.cast(self.ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)(vtbl[index])
+        return fn(self.ptr, *args)
+
+    def set(self, hwnd, state, frac=0.0):
+        if not self.tried:
+            self._init()
+        if not self.ptr:
+            return
+        try:
+            import ctypes
+            self._call(10, (ctypes.c_void_p, ctypes.c_int), hwnd, state)               # SetProgressState
+            if state in (self.NORMAL, self.ERROR, self.PAUSED):
+                self._call(9, (ctypes.c_void_p, ctypes.c_ulonglong, ctypes.c_ulonglong),  # SetProgressValue
+                           hwnd, int(max(0.0, min(1.0, frac)) * 1000), 1000)
+        except Exception:
+            self.ptr = None
 
 
 class Segmented(QWidget):
@@ -225,6 +463,10 @@ class MainWindow(QMainWindow):
         self._stopping = False
         self._applying = False
         self.active_preset = None
+        self.taskbar = _Taskbar()
+        self.pstage = None
+        self.pfrac = 0.0
+        self.p = {}             # progress bookkeeping for the running job
 
         self._build()
         self._load_settings()
@@ -240,6 +482,7 @@ class MainWindow(QMainWindow):
             self.worker.log.connect(self.on_log)
             self.worker.ready.connect(self.on_ready)
             self.worker.download.connect(self.on_download)
+            self.worker.stage.connect(self.on_stage)
             self.worker.preview.connect(self.on_preview)
             self.worker.finished.connect(self.on_finished)
             self.worker.failed.connect(self.on_failed)
@@ -702,9 +945,12 @@ class MainWindow(QMainWindow):
         self.var_strip.hide()
         st.addWidget(self.var_strip)
 
-        self.progress = QProgressBar()
-        self.progress.setTextVisible(False)
-        st.addWidget(self.progress)
+        self.prog = RenderProgress()
+        self.prog.hide()
+        st.addWidget(self.prog)
+        self.prog_clock = QTimer(self)
+        self.prog_clock.setInterval(1000)
+        self.prog_clock.timeout.connect(self._progress_clock)
         mv.addWidget(stage, 1)
 
         gp = QWidget()
@@ -1002,8 +1248,8 @@ class MainWindow(QMainWindow):
         its = float(self.qs.value(self._speed_key(), 0) or 0)
         steps = self.steps_spin.value()
         if its > 0:
-            upscale = {0: 0, 1: 3, 2: 8, 3: 40}.get(upscale_passes(self.native_size(), out)
-                                                     if out > self.native_size() else 0, 60)
+            upscale = UPSCALE_SECONDS.get(upscale_passes(self.native_size(), out)
+                                          if out > self.native_size() else 0, 60)
             t = steps / its + upscale
             prefix = "up to " if self.auto_stop.isChecked() else ""
             self.estimate.setText(f"{out} × {out}  ·  {prefix}{fmt_minutes(t)} on your GPU")
@@ -1046,17 +1292,126 @@ class MainWindow(QMainWindow):
 
     def on_download(self, name, done, total):
         mb = 1024 * 1024
-        self.progress.setRange(0, 1000)
-        self.progress.setValue(int(1000 * done / total) if total else 0)
         self.status.setText(f"Downloading {name}  ·  {done / mb:.0f} / {total / mb:.0f} MB  (first time only)")
+        if self.running:
+            self._set_stage("prepare", done / total if total else -1,
+                            f"{name}  ·  {done / mb:.0f} of {total / mb:.0f} MB  ·  first time only, kept for later",
+                            head="Downloading models")
+
+    def on_stage(self, key, frac, detail):
+        if self.running:
+            self._set_stage(key, frac, detail)
+
+    # ---- progress display
+    def _progress_begin(self, job):
+        s = job["settings"]
+        up = bool(s.output_size and s.output_size > s.image_size and s.upscale_strength > 0)
+        hint = float(self.qs.value(f"speed/{s.image_size}/{s.cutouts}/{s.batch}", 0) or 0)
+        paint_s = s.steps / (hint or 0.6)
+        up_s = UPSCALE_SECONDS.get(upscale_passes(s.image_size, s.output_size), 60) * s.batch if up else 0
+        work = 0.95 * paint_s / (paint_s + up_s)
+        self.p = dict(total=s.steps, step=0, hint=hint, up_s=up_s, auto=s.auto_stop,
+                      out=s.output_size or s.image_size, t0=None,
+                      weights={"prepare": (0.0, 0.04), "paint": (0.04, work), "upscale": (0.04 + work, 0.95 - work),
+                               "save": (0.99, 0.01)})
+        self.pstage, self.pfrac = None, 0.0
+        self.prog.set_upscale_visible(up)
+        self.prog.bar.set_value(-1)
+        self.prog.bar.set_state("run")
+        self.prog.right.setText("")
+        self.prog.show()
+        self.view.set_image(None)
+        self.stack.setCurrentIndex(1)
+        self._set_stage("prepare", -1, "Starting the engine")
+        self.prog_clock.start()
+
+    def _paint_rate(self):
+        t0 = self.p.get("t0")
+        if t0 and self.p["step"] - t0[1] >= 3:
+            return (self.p["step"] - t0[1]) / max(time.time() - t0[0], 1e-6)
+        return self.p.get("hint") or 0.0
+
+    def _set_stage(self, key, frac, detail, head=None):
+        now = time.time()
+        if key != self.pstage:
+            self.pstage, self.pfrac = key, -1.0
+            self.p["stage_t0"] = now
+            self.prog.set_active(key)
+        if frac >= 0:
+            frac = max(frac, self.pfrac)  # never jump backwards inside a stage
+        self.pfrac = frac
+        if key == "paint" and frac >= 0:
+            step = round(frac * self.p["total"])
+            self.p["step"] = step
+            if self.p["t0"] is None and step >= 1:
+                self.p["t0"] = (now, step)  # measure speed after the warm-up step
+            rate = self._paint_rate()
+            if step and rate:
+                detail += f"  ·  {rate:.2f} steps/s"
+        self.prog.bar.set_value(frac)
+        head = head or STAGES[key][1]
+        if key == "upscale":
+            head += f" to {self.p['out']} × {self.p['out']}"
+        if self.queue:
+            head += f"   ·   {len(self.queue)} more in queue"
+        if self._stopping:
+            head = "Stopping after this step…"
+        self.prog.headline.setText(head)
+        self.prog.detail.setText(detail)
+        if self.view.img is None:
+            self.view.set_placeholder(head, detail)
+        self._progress_clock()
+
+    def _overall(self):
+        start, width = self.p["weights"].get(self.pstage, (0.0, 0.0))
+        return start + width * max(0.0, self.pfrac)
+
+    def _progress_clock(self):
+        if not self.running:
+            return
+        parts = []
+        rem = None
+        if self.pstage == "paint":
+            rate = self._paint_rate()
+            if rate:
+                rem = (self.p["total"] - self.p["step"]) / rate + self.p["up_s"]
+        elif self.pstage == "upscale" and self.pfrac >= 0.03:
+            rem = (time.time() - self.p["stage_t0"]) / self.pfrac * (1 - self.pfrac)
+        if rem is not None:
+            parts.append(("at most " if self.pstage == "paint" and self.p["auto"] else "about ") +
+                         fmt_time(rem) + " left")
+        parts.append(f"{fmt_time(time.time() - self.run_started)} elapsed")
+        self.prog.right.setText("   ·   ".join(parts))
+        pct = self._overall()
+        self.setWindowTitle(f"{pct * 100:.0f}% · {STAGES[self.pstage][1] if self.pstage else 'Working'} — VAIM Studio")
+        if self.pstage == "prepare" and self.pfrac < 0:
+            self.taskbar.set(int(self.winId()), _Taskbar.BUSY)
+        else:
+            self.taskbar.set(int(self.winId()), _Taskbar.NORMAL, pct)
+
+    def _progress_end(self, state, head, detail="", right=""):
+        self.prog_clock.stop()
+        self.prog.bar.set_state(state)
+        if state == "done":
+            self.prog.bar.set_value(1.0)
+            self.prog.set_active(None)
+        elif self.prog.bar.value < 0:
+            self.prog.bar.set_value(0.0)
+        self.prog.headline.setText(head)
+        self.prog.detail.setText(detail)
+        self.prog.right.setText(right)
+        self.pstage = None
+        self.view.set_placeholder(None)
+        if self.view.img is None:
+            self.stack.setCurrentIndex(0)
+        self.setWindowTitle("VAIM Studio")
+        self.taskbar.set(int(self.winId()), _Taskbar.ERROR if state == "error" else _Taskbar.NONE, 1.0)
 
     def on_preview(self, p):
         if p.final:
             return
         self.current = p.images
         self.show_current()
-        self.progress.setRange(0, p.total)
-        self.progress.setValue(p.step)
         eta = (p.total - p.step) / p.its if p.its > 0 else 0
         settle = f"  ·  change {p.change:.4f}" if p.change >= 0 else ""
         self.status.setText(f"Dreaming  ·  step {p.step} / {p.total}  ·  loss {p.loss:.2f}{settle}")
@@ -1096,11 +1451,15 @@ class MainWindow(QMainWindow):
 
     def on_finished(self, p, job):
         s = job["settings"]
-        self.set_running(False)
         if p.step == 0:
+            self.set_running(False)
             self.status.setText("Stopped before the first step - nothing saved")
+            self._progress_end("stopped", "Stopped", "Stopped before the first step, so nothing was saved.")
             self._after_job()
             return
+        self._set_stage("save", -1, f"Writing to {Path(job['out_dir']).name}")
+        QApplication.processEvents()
+        self.set_running(False)
         self.current = p.images
         meta = s.to_meta()
         meta.update(steps_done=job.get("steps_before", 0) + p.step, seconds=round(time.time() - self.run_started, 1),
@@ -1122,8 +1481,11 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Saved {len(self.last_paths)} image(s) at {size} × {size}  ·  "
                             f"{p.step} steps in {fmt_time(took)}" + (f"  ·  {p.note} (auto-finish)" if p.note else ""))
         self.speed_label.setText(f"{p.its:.2f} it/s")
-        self.progress.setRange(0, 1)
-        self.progress.setValue(1)
+        n = len(self.last_paths)
+        self._progress_end("done", f"Done  ·  saved {n} image{'s' if n != 1 else ''} at {size} × {size}",
+                           f"{p.step} steps" + (f", {p.note} (auto-finish: the picture had stopped changing)"
+                                                if p.note else "") + f"  ·  in {out_dir.name}",
+                           f"took {fmt_time(took)}")
         self.continue_btn.setEnabled(True)
         self.reveal_btn.setEnabled(bool(self.last_paths))
         if out_dir == self.out_dir:
@@ -1138,7 +1500,9 @@ class MainWindow(QMainWindow):
         short = msg.split("\n\n")[0]
         if short == "Download cancelled." or self._stopping:
             self.status.setText("Stopped")
+            self._progress_end("stopped", "Stopped", "Nothing was saved from this render.")
         else:
+            self._progress_end("error", "Something went wrong", (short.splitlines() or ["Error"])[0][:200])
             self.status.setText((short.splitlines() or ["Error"])[0][:160])
             self.queue_paused = True  # don't plough through the queue after an error
             box = QMessageBox(self)
@@ -1174,6 +1538,7 @@ class MainWindow(QMainWindow):
             self.queue_paused = True
             self.worker.stop()
             self.status.setText("Stopping after this step…")
+            self.prog.headline.setText("Stopping after this step…")
 
     def dream_or_stop(self):
         if self.running:
@@ -1196,8 +1561,7 @@ class MainWindow(QMainWindow):
         self.var_strip.hide()
         self.run_started = time.time()
         self.set_running(True)
-        self.progress.setRange(0, job["settings"].steps)
-        self.progress.setValue(0)
+        self._progress_begin(job)
         self.title.setText(job["settings"].prompt[:120])
         self.status.setText("Loading models…")
         self.start_dream.emit(job)

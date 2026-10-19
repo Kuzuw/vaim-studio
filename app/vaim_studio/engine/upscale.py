@@ -83,15 +83,22 @@ class Upscaler:
         self.tile = 0  # 0 = whole image; lowered automatically on out-of-memory
 
     @torch.no_grad()
-    def _forward(self, x, tile):
+    def _forward(self, x, tile, on_tile=None):
         if not tile or (x.shape[-1] <= tile and x.shape[-2] <= tile):
             return self.net(x)
         # overlapped tiles, each with a margin that is cropped away (no seams)
         t, pad = tile, 32
         _, c, h, w = x.shape
         out = x.new_zeros(1, 3, h * 2, w * 2)
+        n = -(-h // t) * -(-w // t)
+        i = 0
         for y0 in range(0, h, t):
             for x0 in range(0, w, t):
+                if on_tile and i:
+                    if x.is_cuda:
+                        torch.cuda.synchronize(x.device)  # report finished tiles, not queued ones
+                    on_tile(i, n)
+                i += 1
                 y1, x1 = min(y0 + t, h), min(x0 + t, w)
                 py0, px0 = max(y0 - pad, 0), max(x0 - pad, 0)
                 py1, px1 = min(y1 + pad, h), min(x1 + pad, w)
@@ -101,12 +108,13 @@ class Upscaler:
         return out
 
     @torch.no_grad()
-    def run(self, im: Image.Image) -> Image.Image:
+    def run(self, im: Image.Image, on_tile=None) -> Image.Image:
+        """x2 upscale. on_tile(done, total) reports progress while tiles are processed."""
         x = torch.from_numpy(np.array(im.convert("RGB"))).permute(2, 0, 1)[None].float().div(255).to(self.device)
         tile = self.tile or (0 if max(im.size) <= 640 else 512)  # big inputs go straight to tiles
         while True:
             try:
-                y = self._forward(x.half() if self.half else x, tile).float()
+                y = self._forward(x.half() if self.half else x, tile, on_tile).float()
                 if self.half and not torch.isfinite(y).all():  # GTX 16xx fp16 trouble -> fp32
                     self.half = False
                     self.net.float()
@@ -120,4 +128,6 @@ class Upscaler:
             tile = 512 if not tile else max(64, tile // 2)
             self.tile = tile  # remember for the next image
         a = (y[0].clamp(0, 1) * 255 + 0.5).byte().permute(1, 2, 0).cpu().numpy()
+        if on_tile:
+            on_tile(1, 1)
         return Image.fromarray(a)

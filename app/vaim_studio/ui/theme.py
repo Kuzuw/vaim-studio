@@ -106,8 +106,14 @@ QSlider::sub-page:horizontal {{ background: qlineargradient(x1:0, y1:0, x2:1, y2
 QSlider::handle:horizontal {{ background: {TEXT}; width: 16px; height: 16px; margin: -6px 0; border-radius: 8px; }}
 QSlider::handle:horizontal:hover {{ background: #ffffff; }}
 
-QProgressBar {{ background: {CARD}; border: none; border-radius: 2px; height: 4px; max-height: 4px; }}
-QProgressBar::chunk {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {ACCENT}, stop:1 {ACCENT_2}); border-radius: 2px; }}
+QFrame#progress_card {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 10px; }}
+QLabel#phead {{ font-size: 10.5pt; font-weight: 600; }}
+QLabel#pdetail, QLabel#pright {{ color: {MUTED}; font-size: 9pt; }}
+QLabel#pchev {{ color: {FAINT}; font-size: 9pt; padding: 0 1px; }}
+QLabel#pchip {{ color: {FAINT}; font-size: 8.5pt; padding: 2px 8px; border: 1px solid transparent; border-radius: 9px; }}
+QLabel#pchip_on {{ color: {TEXT}; background: {ACCENT_LO}; border: 1px solid {ACCENT}; font-size: 8.5pt;
+    font-weight: 600; padding: 2px 8px; border-radius: 9px; }}
+QLabel#pchip_done {{ color: {MUTED}; font-size: 8.5pt; padding: 2px 8px; border: 1px solid transparent; }}
 
 QListWidget {{ background: transparent; border: none; outline: none; }}
 QListWidget::item {{ border: 2px solid transparent; border-radius: 8px; padding: 2px; }}

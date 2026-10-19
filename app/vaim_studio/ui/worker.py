@@ -24,6 +24,7 @@ class EngineWorker(QObject):
     preview = Signal(object)                # engine Preview
     finished = Signal(object, object)       # final Preview, job dict
     failed = Signal(str, object)            # message, job
+    stage = Signal(str, float, str)         # "prepare" | "paint" | "upscale", fraction (-1 = unknown), detail
 
     def __init__(self):
         super().__init__()
@@ -50,6 +51,7 @@ class EngineWorker(QObject):
             self._log("Starting PyTorch ...")
             from ..engine import Dreamer
             self.dreamer = Dreamer(log=self._log)
+            self.dreamer.stage = lambda key, frac=-1.0, detail="": self.stage.emit(key, float(frac), detail)
             self.ready.emit(self.dreamer.gpu_name(), self.dreamer.vram_gb())
         except Exception as e:
             self._fail(f"Could not start PyTorch:\n{e}\n\n{traceback.format_exc()}")
@@ -60,6 +62,7 @@ class EngineWorker(QObject):
         s = job["settings"]
         progress = lambda f, d, t: self.download.emit(f, float(d), float(t))  # noqa: E731
         _keep_awake(True)
+        self.stage.emit("prepare", -1.0, "Getting the models ready")
         try:
             self.dreamer.ensure_models(s.image_size, s.clip_model, progress=progress, cancelled=self._stopped)
             if s.output_size and s.output_size > s.image_size and s.upscale_strength > 0:

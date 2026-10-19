@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.0 — you can always see what it's doing
+
+- New progress panel under the image: **Prepare › Paint › Upscale › Save**, with the current stage
+  highlighted, a bar that keeps moving (it never looks frozen), what is happening right now
+  ("Loading CLIP…", "Finding the fastest settings for your GPU · test 3", "step 210 of 350 · 0.41 steps/s",
+  "pass 2 of 2 · 1024 → 2048 px"), time left and time elapsed.
+- Before the first preview the canvas shows a spinner with the current step instead of the old welcome page.
+- The first preview now appears after 1 step instead of 10.
+- Upscaling reports real progress tile by tile.
+- Progress percentage in the window title and on the Windows taskbar button, so you can follow a render
+  from another app.
+- Clear end states: *Done* (with where it was saved and how long it took), *Stopped*, or *Something went wrong*.
+
 ## 1.0.0 — first release
 
 **App**

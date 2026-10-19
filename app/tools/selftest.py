@@ -231,15 +231,33 @@ def ui_test():
         w.add_to_queue()           # running -> waits in the queue
         assert len(sent) == 1 and len(w.queue) == 1, (len(sent), len(w.queue))
         job = sent[0]
+        # progress display: prepare (spinner on the canvas), download, paint with time left
+        assert w.prog.isVisible() and w.view.placeholder is not None
+        w.on_stage("prepare", -1.0, "Loading the BigGAN 512 painter onto your GPU")
+        w.on_download("pytorch_model.bin", 120 * 2**20, 300 * 2**20)
+        app.processEvents()
+        shot1 = app_home() / "ui_preview_loading.png"
+        w.grab().save(str(shot1))
+        assert w.prog.chips["prepare"].objectName() == "pchip_on"
+        w.on_stage("paint", 0.0, "step 0 of 300")
         yy, xx = np.mgrid[0:512, 0:512] / 511.0   # a soft test image (stand-in for a render)
         r = np.hypot(xx - 0.5, yy - 0.45)
         im = Image.fromarray((np.stack([0.75 - 0.6 * r + 0.2 * xx, 0.45 - 0.5 * r + 0.25 * yy,
                                         0.7 - 0.4 * r], -1).clip(0, 1) * 255).astype(np.uint8))
-        w.on_preview(Preview(10, 300, [im], 12.3, 1.49, vram=2.3))
+        w.on_stage("paint", 120 / 300, "step 120 of 300")
+        w.on_preview(Preview(120, 300, [im], 12.3, 1.49, vram=2.3))
+        w.p["t0"] = (time.time() - 80, 1)   # pretend 80 s of painting so a time-left shows
+        w.on_stage("paint", 121 / 300, "step 121 of 300")
+        assert "left" in w.prog.right.text() and "%" in w.windowTitle(), (w.prog.right.text(), w.windowTitle())
+        assert w.prog.chips["prepare"].objectName() == "pchip_done"
+        app.processEvents()
+        w.grab().save(str(app_home() / "ui_preview_painting.png"))
+        w.on_stage("upscale", 0.5, "pass 1 of 1 · 512 → 1024 px")
         lat = [{"normu": np.zeros((15, 128)), "cls": np.zeros((15, 1000)), "z": np.zeros((15, 128)),
                 "classes": np.zeros((15, 1000))}]
         big = im.resize((1080, 1080))
         w.on_finished(Preview(300, 300, [big], 10.0, 1.5, final=True, latents=lat, native=[im]), job)
+        assert w.prog.bar.state == "done" and w.windowTitle() == "VAIM Studio"
         saved = storage.list_images(w.out_dir)
         assert len(saved) == 1 and Image.open(saved[0]).size == (1080, 1080)
         assert w.gallery.count() == 1
