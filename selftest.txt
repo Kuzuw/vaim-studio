@@ -1,0 +1,25 @@
+
+Correctness (new code vs. the original big-sleep code)
+  [[92mPASS[0m] BigGAN baked/batched output == original (batch of 3) max err 9.69e-08 (tol 1e-04)
+  [[92mPASS[0m] BigGAN latent gradients == original                  max err 2.00e-11 (tol 1e-05)
+  [[92mPASS[0m] gradient checkpointing gives identical gradients     max err 0.00e+00 (tol 1e-06)
+  [[92mPASS[0m] latent loss (vectorised) == original loop            max err 9.54e-07 (tol 1e-04)
+  [[92mPASS[0m] class loss without topk == original (sigmoid)        max err 0.00e+00 (tol 1e-05)
+  [[92mPASS[0m] class loss without topk == original (top-15)         max err 0.00e+00 (tol 1e-05)
+  [[92mPASS[0m] batched cutouts == per-crop crop+interpolate (bilinear) max err 9.06e-06 (tol 1e-04)
+  [[92mPASS[0m] chunked CLIP backward == single backward             max err 0.00e+00 (tol 1e-06)
+
+Pipeline smoke test (tiny random models, CPU)
+  [[92mPASS[0m] dream run: 2 variations, chunked CLIP, previews, latents max err 0.00e+00 (tol 5e-01)
+  [[92mPASS[0m] continue from saved latents                          max err 0.00e+00 (tol 5e-01)
+  [[92mPASS[0m] auto-stop ends a settled run early                   max err 0.00e+00 (tol 5e-01)
+  [[92mPASS[0m] Real-ESRGAN x2 whole + tiled output size             max err 0.00e+00 (tol 5e-01)
+  [[92mPASS[0m] Lanczos-only upscale to custom size                  max err 0.00e+00 (tol 5e-01)
+  [[92mPASS[0m] upscale a finished image (pixels, latents, progress) max err 0.00e+00 (tol 5e-01)
+  [[92mPASS[0m] stopping an upscale cancels it                       max err 0.00e+00 (tol 5e-01)
+
+User interface test (off-screen)
+    screenshot: /home/runner/work/vaim-studio/vaim-studio/vaim-home/ui_preview.png
+  [[92mPASS[0m] main window builds, queues, previews, saves, re-dreams max err 0.00e+00 (tol 5e-01)
+
+All checks passed.
