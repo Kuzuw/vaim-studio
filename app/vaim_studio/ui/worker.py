@@ -24,6 +24,7 @@ class EngineWorker(QObject):
     preview = Signal(object)                # engine Preview
     finished = Signal(object, object)       # final Preview, job dict
     failed = Signal(str, object)            # message, job
+    upscaled = Signal(object, object)       # PIL image, upscale job
     stage = Signal(str, float, str)         # "prepare" | "paint" | "upscale", fraction (-1 = unknown), detail
 
     def __init__(self):
@@ -75,5 +76,27 @@ class EngineWorker(QObject):
                 self._fail("Download cancelled.", job)
             else:
                 self._fail(f"{e}\n\n{traceback.format_exc()}", job)
+        finally:
+            _keep_awake(False)
+
+    @Slot(object)
+    def upscale(self, job):
+        """job: src (Path), target (long side px), strength, latents/image_size (optional)."""
+        self._stop = False
+        progress = lambda f, d, t: self.download.emit(f, float(d), float(t))  # noqa: E731
+        _keep_awake(True)
+        self.stage.emit("prepare", -1.0, f"Opening {job['src'].name}")
+        try:
+            from PIL import Image
+            with Image.open(job["src"]) as im:
+                im = im.convert("RGB")
+            out = self.dreamer.upscale_image(im, job["target"], job["strength"], job.get("latents"),
+                                             job.get("image_size"), progress=progress, cancelled=self._stopped)
+            self.upscaled.emit(out, job)
+        except Exception as e:
+            if type(e).__name__ == "Cancelled":
+                self._fail("Upscale cancelled.", job)
+            else:
+                self._fail(f"Could not upscale {job['src'].name}: {e}\n\n{traceback.format_exc()}", job)
         finally:
             _keep_awake(False)

@@ -11,7 +11,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
     QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
@@ -51,6 +51,7 @@ PRESETS = {
 STAGES = {"prepare": ("Prepare", "Getting ready"), "paint": ("Paint", "Painting"),
           "upscale": ("Upscale", "Upscaling"), "save": ("Save", "Saving")}
 UPSCALE_SECONDS = {0: 0, 1: 3, 2: 8, 3: 40}   # per image by number of x2 passes (GTX 1650), for estimates
+UPSCALE_TARGETS = [("1080 × 1080", 1080), ("2K  ·  2048 × 2048", 2048), ("4K  ·  4096 × 4096", 4096)]
 
 EXAMPLES = [
     "a lighthouse in a storm at night",
@@ -307,9 +308,11 @@ class RenderProgress(QFrame):
         bottom.addWidget(self.right)
         v.addLayout(bottom)
 
-    def set_upscale_visible(self, on):
-        self.chips["upscale"].setVisible(on)
-        self.seps["upscale"].setVisible(on)
+    def show_stages(self, keys):
+        for k in STAGES:
+            self.chips[k].setVisible(k in keys)
+            if k in self.seps:
+                self.seps[k].setVisible(k in keys)
 
     def set_active(self, key):
         """Mark stages before `key` done and `key` active (key=None: all done)."""
@@ -436,6 +439,7 @@ def restyle(w, name):
 
 class MainWindow(QMainWindow):
     start_dream = Signal(object)
+    start_upscale = Signal(object)
 
     def __init__(self, icon: QIcon = None, start_engine=True, settings: QSettings = None):
         super().__init__()
@@ -487,6 +491,8 @@ class MainWindow(QMainWindow):
             self.worker.finished.connect(self.on_finished)
             self.worker.failed.connect(self.on_failed)
             self.start_dream.connect(self.worker.dream)
+            self.worker.upscaled.connect(self.on_upscaled)
+            self.start_upscale.connect(self.worker.upscale)
             self.engine_thread.start()
 
     # ================================================================== layout
@@ -912,13 +918,18 @@ class MainWindow(QMainWindow):
         self.continue_btn.setObjectName("tool")
         self.continue_btn.setToolTip("Continue the last result for 200 more steps (uses the prompt box)")
         self.continue_btn.clicked.connect(self.continue_dream)
+        self.upscale_btn = QPushButton("Upscale  ▾")
+        self.upscale_btn.setObjectName("tool")
+        self.upscale_btn.setToolTip("Save a bigger copy of this image (1080, 2K, 4K or custom) with Real-ESRGAN")
+        self.upscale_btn.clicked.connect(self.upscale_current)
         self.reveal_btn = QPushButton("Show in folder")
         self.reveal_btn.setObjectName("tool")
         self.reveal_btn.clicked.connect(self.reveal_current)
-        for w in (self.zoom_btn, self.continue_btn, self.reveal_btn):
+        for w in (self.zoom_btn, self.continue_btn, self.upscale_btn, self.reveal_btn):
             w.setCursor(Qt.PointingHandCursor)
             bar.addWidget(w)
         self.continue_btn.setEnabled(False)
+        self.upscale_btn.setEnabled(False)
         self.reveal_btn.setEnabled(False)
         st.addLayout(bar)
 
@@ -1310,19 +1321,23 @@ class MainWindow(QMainWindow):
         paint_s = s.steps / (hint or 0.6)
         up_s = UPSCALE_SECONDS.get(upscale_passes(s.image_size, s.output_size), 60) * s.batch if up else 0
         work = 0.95 * paint_s / (paint_s + up_s)
+        out = s.output_size or s.image_size
         self.p = dict(total=s.steps, step=0, hint=hint, up_s=up_s, auto=s.auto_stop,
-                      out=s.output_size or s.image_size, t0=None,
+                      out_label=f"{out} × {out}", t0=None,
                       weights={"prepare": (0.0, 0.04), "paint": (0.04, work), "upscale": (0.04 + work, 0.95 - work),
                                "save": (0.99, 0.01)})
+        self.view.set_image(None)
+        self._progress_start({"prepare", "paint", "save"} | ({"upscale"} if up else set()), "Starting the engine")
+
+    def _progress_start(self, stages, first_detail):
         self.pstage, self.pfrac = None, 0.0
-        self.prog.set_upscale_visible(up)
+        self.prog.show_stages(stages)
         self.prog.bar.set_value(-1)
         self.prog.bar.set_state("run")
         self.prog.right.setText("")
         self.prog.show()
-        self.view.set_image(None)
         self.stack.setCurrentIndex(1)
-        self._set_stage("prepare", -1, "Starting the engine")
+        self._set_stage("prepare", -1, first_detail)
         self.prog_clock.start()
 
     def _paint_rate(self):
@@ -1351,7 +1366,7 @@ class MainWindow(QMainWindow):
         self.prog.bar.set_value(frac)
         head = head or STAGES[key][1]
         if key == "upscale":
-            head += f" to {self.p['out']} × {self.p['out']}"
+            head += f" to {self.p['out_label']}"
         if self.queue:
             head += f"   ·   {len(self.queue)} more in queue"
         if self._stopping:
@@ -1488,6 +1503,7 @@ class MainWindow(QMainWindow):
                            f"took {fmt_time(took)}")
         self.continue_btn.setEnabled(True)
         self.reveal_btn.setEnabled(bool(self.last_paths))
+        self.upscale_btn.setEnabled(bool(self.last_paths))
         if out_dir == self.out_dir:
             self.refresh_gallery()
         self._update_estimate()
@@ -1555,6 +1571,9 @@ class MainWindow(QMainWindow):
         self.launch(job)
 
     def launch(self, job):
+        if job.get("kind") == "upscale":
+            self.launch_upscale(job)
+            return
         self.job = job
         self.current, self.focus = [], 0
         self.var_strip.clear()
@@ -1612,6 +1631,12 @@ class MainWindow(QMainWindow):
             return
         self.queue_list.clear()
         for job in self.queue:
+            if job.get("kind") == "upscale":
+                it = QListWidgetItem(f"↑ {job['target']}px · {job['src'].name[:66]}")
+                it.setToolTip(f"Upscale {job['src']}\nto {job['target']} px (long side), "
+                              f"sharpness {round(job['strength'] * 100)}%")
+                self.queue_list.addItem(it)
+                continue
             s = job["settings"]
             size = s.output_size or s.image_size
             it = QListWidgetItem(f"{size}px · {s.prompt[:70] or '(image prompt)'}")
@@ -1633,7 +1658,8 @@ class MainWindow(QMainWindow):
         menu.addAction("Remove", lambda: (self.queue.pop(row), self.refresh_queue()))
         if row > 0:
             menu.addAction("Move up", lambda: (self.queue.insert(row - 1, self.queue.pop(row)), self.refresh_queue()))
-        menu.addAction("Load its settings", lambda: self.apply_meta(self.queue[row]["settings"].to_meta()))
+        if "settings" in self.queue[row]:
+            menu.addAction("Load its settings", lambda: self.apply_meta(self.queue[row]["settings"].to_meta()))
         menu.exec(self.queue_list.mapToGlobal(pos))
 
     # ---- misc
@@ -1690,6 +1716,119 @@ class MainWindow(QMainWindow):
             "<p style='color:#9a98a8'>big-sleep by Phil Wang &amp; Ryan Murdock (MIT) · BigGAN port by "
             "Hugging Face · CLIP by OpenAI · Real-ESRGAN by Xintao Wang et al.</p>")
 
+    # ================================================================== upscale a finished image
+    def upscale_current(self):
+        if not self.last_paths:
+            return
+        menu = QMenu(self)
+        self._fill_upscale_menu(menu, [self.last_paths[min(self.focus, len(self.last_paths) - 1)]])
+        menu.exec(self.upscale_btn.mapToGlobal(self.upscale_btn.rect().bottomLeft()))
+
+    @staticmethod
+    def _image_size(p):
+        try:
+            with Image.open(p) as im:
+                return im.size
+        except Exception:
+            return (0, 0)
+
+    def _fill_upscale_menu(self, menu, paths):
+        sizes = [self._image_size(p) for p in paths]
+        longest = max(max(s) for s in sizes)
+        if len(paths) == 1:
+            head = f"Now {sizes[0][0]} × {sizes[0][1]}  ·  saves a new copy next to it"
+        else:
+            head = f"{len(paths)} images  ·  saves new copies next to them"
+        menu.addAction(head).setEnabled(False)
+        for text, size in UPSCALE_TARGETS:
+            a = menu.addAction(text, lambda size=size: self.queue_upscale(paths, size))
+            a.setEnabled(any(0 < max(s) < size for s in sizes))
+        menu.addAction("Custom size…", lambda: self._custom_upscale(paths, longest))
+        menu.addSeparator()
+        menu.addAction(f"Sharpness {self.sharpen.value()}%  (slider under Size)").setEnabled(False)
+
+    def _custom_upscale(self, paths, longest):
+        v, ok = QInputDialog.getInt(self, "Upscale", "Longest side in pixels:",
+                                    min(8192, max(1080, longest * 2)), 256, 8192, 64)
+        if ok:
+            self.queue_upscale(paths, v)
+
+    def queue_upscale(self, paths, size):
+        """Queue an upscale job per image (images already that big are skipped)."""
+        jobs = []
+        for p in paths:
+            p = Path(p)
+            if not 0 < max(self._image_size(p)) < size:
+                continue
+            m = storage.read_meta(p) or {}
+            lat = storage.read_latents(p) if m.get("image_size") else None
+            jobs.append({"kind": "upscale", "src": p, "target": size, "strength": self.sharpen.value() / 100,
+                         "latents": lat, "image_size": m.get("image_size") if lat is not None else None, "meta": m})
+        if not jobs:
+            self.status.setText(f"Already {size} px or larger - nothing to upscale")
+            return
+        self.queue.extend(jobs)
+        if not self.running and self.engine_ready:
+            self.queue_paused = False
+            self.start_next()
+        else:
+            self.status.setText(f"Upscale added to the queue  ·  {len(self.queue)} waiting")
+            self.refresh_queue()
+
+    def launch_upscale(self, job):
+        self.job = job
+        src = job["src"]
+        self.run_started = time.time()
+        self.set_running(True)
+        try:
+            im = Image.open(src).convert("RGB")
+        except Exception:
+            im = None
+        self.current, self.focus = ([im] if im else []), 0
+        self.var_strip.clear()
+        self.var_strip.hide()
+        self.view.set_image(im, keep_view=False)
+        w, h = im.size if im else (1, 1)
+        sc = job["target"] / max(w, h)
+        self.p = dict(total=1, step=0, hint=0.0, up_s=0, auto=False, t0=None,
+                      out_label=f"{max(1, round(w * sc))} × {max(1, round(h * sc))}",
+                      weights={"prepare": (0.0, 0.1), "upscale": (0.1, 0.88), "save": (0.98, 0.02)})
+        self._progress_start({"prepare", "upscale", "save"}, f"Opening {src.name}")
+        self.title.setText(f"Upscaling {src.name}")
+        self.status.setText(f"Upscaling {src.name} to {job['target']} px")
+        self.start_upscale.emit(job)
+
+    def on_upscaled(self, image, job):
+        src = job["src"]
+        self._set_stage("save", -1, f"Writing a new file next to {src.name}")
+        QApplication.processEvents()
+        self.set_running(False)
+        meta = dict(job.get("meta") or {})
+        meta.update(output_size=max(image.size), upscale_strength=job["strength"], upscaled_from=src.name,
+                    app_version=__version__)
+        try:
+            path = storage.save_upscaled(src, image, meta, job.get("latents"))
+        except Exception as e:
+            QMessageBox.critical(self, "VAIM Studio", f"Could not save next to {src}:\n{e}")
+            self._progress_end("error", "Could not save the upscaled image", str(e)[:200])
+            self._after_job()
+            return
+        took = time.time() - self.run_started
+        self.current, self.focus = [image], 0
+        self.show_current()
+        self.last_paths = [path]
+        self.title.setText(path.name)
+        self.reveal_btn.setEnabled(True)
+        self.upscale_btn.setEnabled(True)
+        self.status.setText(f"Saved {path.name}  ·  {image.width} × {image.height}")
+        self._progress_end("done", f"Done  ·  upscaled to {image.width} × {image.height}",
+                           f"saved as {path.name}  ·  the original is unchanged", f"took {fmt_time(took)}")
+        if path.parent == self.out_dir:
+            self.refresh_gallery()
+        if not self.isActiveWindow():
+            QApplication.alert(self, 0)
+        self._after_job()
+
     # ================================================================== gallery
     def refresh_gallery(self):
         self._update_folder_button()
@@ -1724,6 +1863,7 @@ class MainWindow(QMainWindow):
         self.title.setText(p.name)
         self.last_paths = [p]
         self.reveal_btn.setEnabled(True)
+        self.upscale_btn.setEnabled(True)
         m = storage.read_meta(p)
         if m:
             w = self.current[0].width
@@ -1745,11 +1885,13 @@ class MainWindow(QMainWindow):
             a = menu.addAction("Re-dream from this (new prompt)", lambda: self.use_as_start(p))
             a.setEnabled(storage.latents_path(p).is_file() and m is not None)
             a = menu.addAction("Load its settings", lambda: self.apply_meta(m))
-            a.setEnabled(m is not None)
+            a.setEnabled(bool(m) and "image_size" in m)
             menu.addAction("Copy prompt", lambda: QApplication.clipboard().setText((m or {}).get("prompt", "")))
             menu.addSeparator()
             menu.addAction("Open", lambda: storage.open_file(p))
             menu.addAction("Show in folder", lambda: storage.open_in_explorer(p))
+        up = menu.addMenu(f"Upscale {len(items)} images to" if len(items) > 1 else "Upscale to")
+        self._fill_upscale_menu(up, [self._item_path(it) for it in items])
         menu.addSeparator()
         menu.addAction(f"Delete {len(items)} images…" if len(items) > 1 else "Delete…", lambda: self.delete_items(items))
         menu.exec(self.gallery.mapToGlobal(pos))

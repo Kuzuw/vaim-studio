@@ -76,11 +76,36 @@ def save_dream(out_dir: Path, image: Image.Image, meta: dict, latents: dict | No
     name = f"{stamp}_{slug(meta.get('prompt'))}_{meta.get('seed', 0)}"
     if meta.get("batch", 1) > 1:
         name += f"_{index + 1}"
-    path = out_dir / f"{name}{ext}"
+    path = _free_name(out_dir, name, ext)
+    _write(path, image, meta, latents, kw)
+    return path
+
+
+def _free_name(folder: Path, name: str, ext: str) -> Path:
+    path = folder / f"{name}{ext}"
     k = 2
     while path.exists() or meta_path(path).exists():
-        path = out_dir / f"{name}-{k}{ext}"
+        path = folder / f"{name}-{k}{ext}"
         k += 1
+    return path
+
+
+def save_upscaled(src: Path, image: Image.Image, meta: dict, latents: dict | None) -> Path:
+    """Save an upscaled copy next to `src` (same format), e.g. name_4K.png, keeping its latents
+    so it can still be re-dreamed."""
+    ext = src.suffix.lower()
+    kw = next((k for e, k in FORMATS.values() if e == {".jpeg": ".jpg"}.get(ext, ext)), None)
+    if kw is None:
+        ext, kw = FORMATS["PNG"]
+    n = max(image.size)
+    tag = {1080: "1080", 2048: "2K", 4096: "4K"}.get(n, f"{n}px")
+    path = _free_name(src.parent, f"{src.stem}_{tag}", ext)
+    _write(path, image, meta, latents, kw)
+    return path
+
+
+def _write(path: Path, image: Image.Image, meta: dict, latents: dict | None, kw: dict):
+    ext = path.suffix.lower()
     meta_json = json.dumps(meta)
     if ext == ".png":
         info = PngImagePlugin.PngInfo()
@@ -102,7 +127,6 @@ def save_dream(out_dir: Path, image: Image.Image, meta: dict, latents: dict | No
     t.convert("RGB").save(thumb_path(path), quality=88)
     if latents is not None:
         np.savez_compressed(_side(path) / (path.name + ".npz"), **latents)
-    return path
 
 
 def read_meta(img: Path) -> dict | None:

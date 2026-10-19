@@ -32,6 +32,7 @@ If you like the dreamlike, slightly uncanny look of early text-to-image models, 
 - **Render queue**: line up prompts, each with its own settings, folder and format, and walk away.
   The PC is kept awake and the taskbar flashes when a render finishes.
 - **Re-dream**: continue a finished image, or start from it and drift toward a new prompt.
+- **Upscale later**: turn any finished image into a 1080, 2K or 4K copy with one click.
 - **Image prompts and avoid words**, `|` to blend ideas, batched variations, fixed seeds.
 - **PNG / JPEG / WebP**, with the full settings stored in every file.
 - **Self-tuning engine**: measures your GPU once per setting and remembers the fastest safe setup.

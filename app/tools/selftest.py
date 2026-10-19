@@ -173,6 +173,22 @@ def smoke():
     s3 = DreamSettings(output_size=300, upscale_strength=0.0)
     r = d.finish_size([Image.new("RGB", (128, 128))], s3)
     check("Lanczos-only upscale to custom size", 0.0 if r[0].size == (300, 300) else 1.0, 0.5)
+    # Upscale button path: any image (non-square too), from saved latents, and cancelling mid-way
+    d.upscaler = up
+    stages = []
+    d.stage = lambda key, frac=-1.0, detail="": stages.append((key, frac))
+    r1 = d.upscale_image(Image.new("RGB", (96, 64), (20, 60, 90)), 300, 0.7)
+    r2 = d.upscale_image(out.images[0], 300, 1.0, latents=out.latents[0], image_size=128)
+    fr = [f for k, f in stages if k == "upscale"]
+    ok = (r1.size == (300, 200) and r2.size == (300, 300) and fr and max(fr) <= 1.0 + 1e-9
+          and any(0 < f < 1 for f in fr))
+    check("upscale a finished image (pixels, latents, progress)", 0.0 if ok else 1.0, 0.5)
+    try:
+        d.upscale_image(out.images[0], 300, 1.0, cancelled=lambda: True)
+        cancelled = False
+    except Exception as e:
+        cancelled = type(e).__name__ == "Cancelled"
+    check("stopping an upscale cancels it", 0.0 if cancelled else 1.0, 0.5)
 
 
 def ui_test():
@@ -261,6 +277,25 @@ def ui_test():
         saved = storage.list_images(w.out_dir)
         assert len(saved) == 1 and Image.open(saved[0]).size == (1080, 1080)
         assert w.gallery.count() == 1
+        # Upscale button: queue an upscale of the saved image, finish it, check the new file
+        w.clear_queue()
+        ups = []
+        w.start_upscale.connect(ups.append)
+        assert w.upscale_btn.isEnabled()
+        w.queue_upscale([saved[0]], 2048)
+        assert len(ups) == 1 and ups[0]["latents"] is not None and w.running
+        assert not w.prog.chips["paint"].isVisibleTo(w.prog) and w.prog.chips["upscale"].isVisibleTo(w.prog)
+        w.on_stage("upscale", 0.4, "pass 1 of 1 · 1080 → 2160 px")
+        assert "2048 × 2048" in w.prog.headline.text(), w.prog.headline.text()
+        w.on_upscaled(big.resize((2048, 2048)), ups[0])
+        up_files = [x for x in storage.list_images(w.out_dir) if x.stem.endswith("_2K")]
+        assert len(up_files) == 1 and Image.open(up_files[0]).size == (2048, 2048), up_files
+        um = storage.read_meta(up_files[0])
+        assert um["upscaled_from"] == saved[0].name and storage.read_latents(up_files[0]) is not None
+        assert w.gallery.count() == 2 and not w.running
+        w.queue_upscale([up_files[0]], 1080)      # already bigger: nothing queued
+        assert len(ups) == 1
+        saved = [saved[0]]
         w.use_as_start(saved[0])   # re-dream path
         assert w.init_from is not None and w.build_settings().init_latents
         w.clear_init()

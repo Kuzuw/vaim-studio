@@ -726,39 +726,64 @@ class Dreamer:
         if s.upscale_strength <= 0:
             return [im.resize((target, target), Image.LANCZOS) for im in images]
         self.ensure_upscaler(progress, cancelled)
-        passes, w = 0, images[0].width
-        while True:  # x2 passes until within 1.5x of the target (512 -> 1080: 1, -> 2K: 2, -> 4K: 3)
+        return [self._upscale_to(im, target, target, s.upscale_strength, cancelled, k, len(images))
+                for k, im in enumerate(images)]
+
+    def _upscale_to(self, im, tw, th, strength, cancelled=None, k=0, n=1, hard_cancel=False):
+        """Real-ESRGAN x2 passes until within 1.5x of the target (512 -> 1080: 1, -> 2K: 2, -> 4K: 3),
+        Lanczos to the exact size, blended with a plain Lanczos enlargement by `strength`.
+        hard_cancel: stopping raises Cancelled mid-pass instead of finishing with fewer passes."""
+        target = max(tw, th)
+        passes, w = 0, max(im.size)
+        while True:
             passes += 1
             w *= 2
             if w * 1.5 >= target:
                 break
-        out = []
-        per_img = sum(4 ** q for q in range(passes))
-        total = per_img * len(images)
-        for k, im in enumerate(images):
-            up = im
-            for p in range(passes):
-                if cancelled and cancelled():
-                    break
-                t0 = time.perf_counter()
-                self.log(f"Upscaling image {k + 1}/{len(images)}: pass {p + 1}/{passes} "
-                         f"({up.width} -> {up.width * 2}px) ...")
-                done = k * per_img + sum(4 ** q for q in range(p))
-                what = (f"image {k + 1} of {len(images)} · " if len(images) > 1 else "") + \
-                    f"pass {p + 1} of {passes} · {up.width} → {up.width * 2} px"
+        per_img = sum(4 ** q for q in range(passes))  # each pass has 4x the pixels of the previous one
+        up = im
+        for p in range(passes):
+            if cancelled and cancelled():
+                if hard_cancel:
+                    raise weights.Cancelled()
+                break
+            t0 = time.perf_counter()
+            self.log(f"Upscaling image {k + 1}/{n}: pass {p + 1}/{passes} ({up.width} -> {up.width * 2}px) ...")
+            done = k * per_img + sum(4 ** q for q in range(p))
+            what = (f"image {k + 1} of {n} · " if n > 1 else "") + \
+                f"pass {p + 1} of {passes} · {up.width} → {up.width * 2} px"
 
-                def on_tile(i, n, done=done, p=p, what=what):
-                    self.stage("upscale", (done + 4 ** p * i / n) / total, what)
-                on_tile(0, 1)
-                up = self.upscaler.run(up, on_tile)
-                self.log(f"  pass {p + 1} took {time.perf_counter() - t0:.1f} s")
-            if up.width != target:
-                up = up.resize((target, target), Image.LANCZOS)
-            if s.upscale_strength < 1:
-                soft = im.resize((target, target), Image.LANCZOS)
-                up = Image.blend(soft, up, s.upscale_strength)
-            out.append(up)
-        return out
+            def on_tile(i, m, done=done, p=p, what=what):
+                if hard_cancel and cancelled and cancelled():
+                    raise weights.Cancelled()
+                self.stage("upscale", (done + 4 ** p * i / m) / (per_img * n), what)
+            on_tile(0, 1)
+            up = self.upscaler.run(up, on_tile)
+            self.log(f"  pass {p + 1} took {time.perf_counter() - t0:.1f} s")
+        if up.size != (tw, th):
+            up = up.resize((tw, th), Image.LANCZOS)
+        if strength < 1:
+            up = Image.blend(im.resize((tw, th), Image.LANCZOS), up, strength)
+        return up
+
+    def upscale_image(self, image, target, strength=0.75, latents=None, image_size=None,
+                      progress=None, cancelled=None):
+        """Upscale a finished image so its long side is `target` px. With the image's saved latents,
+        BigGAN first re-renders the original native canvas: a sharper source than a file that was
+        already upscaled once."""
+        w, h = image.size
+        sc = target / max(w, h)
+        tw, th = max(1, round(w * sc)), max(1, round(h * sc))
+        src = image
+        if latents is not None and image_size and w == h:
+            self.ensure_models(int(image_size), None, progress, cancelled)
+            self.stage("prepare", -1, "Re-rendering the original canvas from its saved latents (sharpest source)")
+            src = self.render(latents["z"], latents["classes"])[0]
+        if strength <= 0:
+            return src.resize((tw, th), Image.LANCZOS)
+        self.ensure_upscaler(progress, cancelled)
+        self.stage("upscale", 0.0, "starting")
+        return self._upscale_to(src, tw, th, strength, cancelled, hard_cancel=True)
 
     # -- main loop -------------------------------------------------------------
     def run(self, s: DreamSettings, on_preview: Callable[[Preview], None] = None,

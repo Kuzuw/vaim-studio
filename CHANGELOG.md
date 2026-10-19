@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.0 — upscale any finished image
+
+- **Upscale ▾** button above the image: make a 1080, 2K, 4K or custom-size copy of the image you're
+  looking at. The original is kept; the copy is saved next to it (`name_4K.png`) with its settings.
+- Right-click in the gallery → **Upscale to**, also for several selected images at once.
+- When the image was made in VAIM Studio, BigGAN first re-renders the original 512 px canvas from the
+  saved latents, so a 1080 render taken to 4K is as sharp as if you had rendered at 4K in the first place.
+  Other images (non-square too) are upscaled from their pixels.
+- Upscales use the *Upscale sharpness* slider, join the render queue, show progress and can be stopped.
+
 ## 1.1.0 — you can always see what it's doing
 
 - New progress panel under the image: **Prepare › Paint › Upscale › Save**, with the current stage
